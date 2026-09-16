@@ -1,0 +1,34 @@
+{
+  "project_info": {
+    "project_number": "241188506271",
+    "project_id": "ayugram-c6a31",
+    "storage_bucket": "ayugram-c6a31.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:241188506271:android:b43c36604ddd027a7fb0aa",
+        "android_client_info": {
+          "package_name": "org.telegram.messenger"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "241188506271-3n5ru8fm0kn3ujr5tphajrtpu076dqa7.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAzki2--tsG2w92-f842qRmY7UfhLO9sg8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

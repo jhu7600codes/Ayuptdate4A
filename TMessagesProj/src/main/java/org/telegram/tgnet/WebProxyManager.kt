@@ -1,0 +1,455 @@
+package org.telegram.tgnet
+
+import android.util.Base64
+import android.util.Log
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import okio.ByteString.Companion.toByteString
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.regex.Pattern
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import kotlin.concurrent.thread
+
+object WebProxyManager {
+    private const val TAG = "WEBPROXY"
+
+    private var serverSocket: ServerSocket? = null
+    private var isRunning = AtomicBoolean(false)
+    private var currentHost = ""
+    private var localPort = 0
+    private var proxyThread: Thread? = null
+
+    private val nextSessionId = AtomicInteger(1)
+    private val activeSessions = ConcurrentHashMap<Int, SessionHandler>()
+
+    private class DohResolver : Dns {
+        override fun lookup(hostname: String): List<java.net.InetAddress> {
+            try {
+                return Dns.SYSTEM.lookup(hostname)
+            } catch (e: Exception) {
+                Log.w(TAG, "Standard DNS failed for $hostname, trying DoH...")
+            }
+            
+            val endpoints = listOf(
+                "https://185.222.222.222/dns-query?name=$hostname&type=A",
+                "https://94.140.14.14/resolve?name=$hostname&type=A",
+                "https://8.8.8.8/resolve?name=$hostname&type=A",
+                "https://1.1.1.1/dns-query?name=$hostname&type=A",
+                "https://cloudflare-dns.com/dns-query?name=$hostname&type=A",
+                "https://dns.google/resolve?name=$hostname&type=A"
+            )
+
+            for (endpoint in endpoints) {
+                try {
+                    val url = java.net.URL(endpoint)
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.setRequestProperty("Accept", "application/dns-json")
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    if (conn.responseCode == 200) {
+                        val body = conn.inputStream.bufferedReader().use { it.readText() }
+                        val addresses = mutableListOf<java.net.InetAddress>()
+                        val matcher = Pattern.compile("\"data\":\"([0-9.]+)\"").matcher(body)
+                        while (matcher.find()) {
+                            addresses.add(java.net.InetAddress.getByName(matcher.group(1)))
+                        }
+                        if (addresses.isNotEmpty()) return addresses
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "DoH endpoint $endpoint failed", e)
+                }
+            }
+            
+            Log.e(TAG, "All DNS and DoH resolution failed for $hostname")
+            throw java.net.UnknownHostException(hostname)
+        }
+    }
+
+    internal val client = OkHttpClient.Builder()
+        // Reduced connect timeout for faster failover
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+        .writeTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .dns(DohResolver())
+        .build()
+
+    @Synchronized
+    fun start(proxyAddress: String) {
+        if (isRunning.get() && currentHost == proxyAddress) return
+        stop()
+
+        currentHost = proxyAddress
+        isRunning.set(true)
+
+        serverSocket = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+        localPort = serverSocket!!.localPort
+
+        proxyThread = thread(start = true, name = "WebProxyThread") {
+            val currentThread = Thread.currentThread()
+            try {
+                Log.d(TAG, "WebProxy ServerSocket started on port $localPort for address $proxyAddress")
+                
+                var cleanHost = proxyAddress
+                if (cleanHost.startsWith("wss://")) cleanHost = cleanHost.substring(6)
+                if (cleanHost.startsWith("ws://")) cleanHost = cleanHost.substring(5)
+                if (cleanHost.startsWith("https://")) cleanHost = cleanHost.substring(8)
+                if (cleanHost.startsWith("http://")) cleanHost = cleanHost.substring(7)
+                
+                val parts = cleanHost.split("/")
+                val hostname = parts[0]
+                val secret = if (parts.size > 1) parts[1] else ""
+                
+                if (secret.isEmpty()) throw Exception("No secret provided")
+
+                // 1. Derive bridge capability
+                var secretBytes = hexStringToByteArray(secret)
+                if (secretBytes.size > 16) {
+                    val firstByte = secretBytes[0].toInt() and 0xFF
+                    if (firstByte == 0xee || firstByte == 0xdd) {
+                        secretBytes = secretBytes.copyOfRange(1, 17)
+                    }
+                }
+
+                val context = "tdesktop-web-proxy-bridge-v1\n$hostname".toByteArray(Charsets.UTF_8)
+                val mac = Mac.getInstance("HmacSHA256")
+                mac.init(SecretKeySpec(secretBytes, "HmacSHA256"))
+                val hmacResult = mac.doFinal(context)
+                val bridgeCapability = Base64.encodeToString(hmacResult, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                
+                // 3. Accept local TGNet connections and spawn session handlers
+                while (isRunning.get() && !serverSocket!!.isClosed) {
+                    val socket = serverSocket!!.accept()
+                    val sessionId = nextSessionId.getAndIncrement()
+                    val handler = SessionHandler(sessionId, socket, hostname, bridgeCapability)
+                    activeSessions[sessionId] = handler
+                    handler.start()
+                }
+            } catch (e: Exception) {
+                if (isRunning.get() && Thread.currentThread() == proxyThread) {
+                    Log.e(TAG, "WebProxy error", e)
+                    try { Thread.sleep(3000) } catch (_: Exception) {}
+                    if (isRunning.get() && Thread.currentThread() == proxyThread) {
+                        Log.d(TAG, "Restarting WebProxy...")
+                        start(proxyAddress) 
+                    }
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    fun stop() {
+        if (!isRunning.compareAndSet(true, false)) return
+        Log.d(TAG, "WebProxy stopping...")
+        currentHost = ""
+        localPort = 0
+        try { serverSocket?.close() } catch (_: Exception) {}
+        serverSocket = null
+        
+        activeSessions.values.forEach { it.stop() }
+        activeSessions.clear()
+        proxyThread?.interrupt()
+        proxyThread = null
+    }
+
+    @Synchronized
+    fun getPort(): Int = localPort
+
+    internal fun removeSession(sessionId: Int) {
+        activeSessions.remove(sessionId)
+    }
+
+    private fun hexStringToByteArray(s: String): ByteArray {
+        val len = s.length
+        val data = ByteArray(len / 2)
+        var i = 0
+        while (i < len) {
+            data[i / 2] = ((Character.digit(s[i], 16) shl 4) + Character.digit(s[i + 1], 16)).toByte()
+            i += 2
+        }
+        return data
+    }
+}
+
+class SessionHandler(
+    private val sessionId: Int,
+    private val socket: Socket,
+    private val activeHostname: String,
+    private val bridgeCapability: String
+) {
+    private val TAG = "WEBPROXY_SESSION_$sessionId"
+    private var isRunning = AtomicBoolean(true)
+    private var sessionToken = ""
+    private var downCursor = "0"
+    private var carrierMode = "https"
+    private var upSequence = AtomicInteger(0)
+    private var ws: WebSocket? = null
+    private var readThread: Thread? = null
+
+    private fun createFrame(type: Int, streamId: Int, data: ByteArray): ByteArray {
+        val size = data.size
+        val frame = ByteArray(8 + size)
+        frame[0] = type.toByte()
+        frame[1] = (streamId ushr 16).toByte()
+        frame[2] = (streamId ushr 8).toByte()
+        frame[3] = streamId.toByte()
+        frame[4] = (size ushr 24).toByte()
+        frame[5] = (size ushr 16).toByte()
+        frame[6] = (size ushr 8).toByte()
+        frame[7] = size.toByte()
+        System.arraycopy(data, 0, frame, 8, size)
+        return frame
+    }
+
+    private fun processDownlink(body: ByteArray) {
+        var offset = 0
+        while (offset < body.size) {
+            if (body.size - offset < 8) {
+                Log.e(TAG, "Incomplete frame header")
+                println("WEBPROXY_ERROR: Incomplete frame header")
+                break
+            }
+            val type = body[offset].toInt() and 0xFF
+            val size = ((body[offset + 4].toInt() and 0xFF) shl 24) or
+                       ((body[offset + 5].toInt() and 0xFF) shl 16) or
+                       ((body[offset + 6].toInt() and 0xFF) shl 8) or
+                       (body[offset + 7].toInt() and 0xFF)
+            
+            val end = offset + 8 + size
+            if (size < 0 || size > 1048576 || end > body.size) {
+                Log.e(TAG, "Invalid frame size: $size")
+                println("WEBPROXY_ERROR: Invalid frame size $size")
+                break
+            }
+            
+            if (type == 2) {
+                if (size > 0) {
+                    val output = socket.getOutputStream()
+                    output.write(body, offset + 8, size)
+                    output.flush()
+                }
+            } else if (type == 3) {
+                Log.d(TAG, "Received CLOSE frame")
+                println("WEBPROXY: Received CLOSE frame")
+                stop()
+                break
+            }
+            offset = end
+        }
+    }
+
+    fun start() {
+        thread(start = true, name = "WebProxySetup_$sessionId") {
+            try {
+                val bridgeUrl = "https://$activeHostname/?bridge=$bridgeCapability"
+                val bridgeRequest = Request.Builder().url(bridgeUrl).build()
+                val bridgeResponse = WebProxyManager.client.newCall(bridgeRequest).execute()
+                if (bridgeResponse.code != 200) throw Exception("Bridge returned HTTP ${bridgeResponse.code}")
+                val bridgeHtml = bridgeResponse.body?.string() ?: ""
+                val bootstrapPattern = Pattern.compile("bootstrap=\"([A-Za-z0-9_-]{43})\"")
+                val matcher = bootstrapPattern.matcher(bridgeHtml)
+                val bootstrapToken = if (matcher.find()) matcher.group(1) else null
+                if (bootstrapToken == null) throw Exception("Bootstrap token not found in bridge page")
+
+                val helloFrame = byteArrayOf(0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01)
+                
+                val sessionRequest = Request.Builder()
+                    .url("https://$activeHostname/api/v1/session")
+                    .header("Authorization", "Bearer $bootstrapToken")
+                    .post(helloFrame.toRequestBody("application/octet-stream".toMediaType()))
+                    .build()
+                
+                val sessionResponse = WebProxyManager.client.newCall(sessionRequest).execute()
+                if (sessionResponse.code == 503) throw Exception("Server returned 503 Service Unavailable")
+                if (!sessionResponse.isSuccessful) throw Exception("Session creation failed: HTTP ${sessionResponse.code}")
+                
+                sessionToken = sessionResponse.header("X-Session-Token") ?: throw Exception("Missing X-Session-Token")
+                downCursor = sessionResponse.header("X-Down-Cursor") ?: "0"
+                carrierMode = sessionResponse.header("X-Carrier-Mode") ?: "https"
+                Log.d(TAG, "Session created successfully, carrier mode: $carrierMode")
+                println("WEBPROXY: Session created successfully, carrier mode: $carrierMode")
+
+                val input = socket.getInputStream()
+                val buf = ByteArray(65536)
+                val read = input.read(buf)
+                if (read <= 0) throw Exception("Failed to read first chunk from TGNet")
+                
+                val firstChunk = buf.copyOfRange(0, read)
+                val openFrame = createFrame(1, 1, ByteArray(0))
+                val dataFrame = createFrame(2, 1, firstChunk)
+                val combined = openFrame + dataFrame
+                sendDataRaw(combined)
+
+                if (carrierMode == "websocket" || carrierMode == "websocket-lanes") {
+                    val wsUrl = "wss://$activeHostname/api/v1/ws"
+                    val protocol = if (carrierMode == "websocket-lanes") "tproxy-lane-v1.$sessionToken.1" else "tproxy-v1.$sessionToken"
+                    val wsRequest = Request.Builder()
+                        .url(wsUrl)
+                        .header("Origin", "https://$activeHostname")
+                        .header("Sec-WebSocket-Protocol", protocol)
+                        .build()
+                    
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var connected = false
+
+                    val wsListener = object : WebSocketListener() {
+                        override fun onOpen(webSocket: WebSocket, response: Response) {
+                            ws = webSocket
+                            connected = true
+                            latch.countDown()
+                        }
+                        override fun onMessage(webSocket: WebSocket, bytes: okio.ByteString) {
+                            try { processDownlink(bytes.toByteArray()) } catch (e: Exception) { stop() }
+                        }
+                        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { stop() }
+                        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { latch.countDown(); stop() }
+                    }
+
+                    WebProxyManager.client.newWebSocket(wsRequest, wsListener)
+                    latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+                    if (!connected) throw Exception("WebSocket connection timeout")
+                } else {
+                    // Start poll loop
+                    thread(start = true, name = "WebProxyPoll_$sessionId") { pollLoop() }
+                }
+
+                readThread = thread(start = true, name = "WebProxyRead_$sessionId") {
+                    try {
+                        val buffer = ByteArray(65536)
+                        while (isRunning.get() && !socket.isClosed) {
+                            val r = socket.getInputStream().read(buffer)
+                            if (r < 0) break
+                            if (r > 0) sendData(buffer.copyOfRange(0, r))
+                        }
+                    } catch (e: Exception) { } finally { stop() }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Setup error", e)
+                println("WEBPROXY_ERROR: Setup error ${e.message}")
+                stop()
+            }
+        }
+    }
+
+    private fun sendData(data: ByteArray) {
+        val dataFrame = createFrame(2, 1, data)
+        sendDataRaw(dataFrame)
+    }
+
+    private fun sendDataRaw(frameData: ByteArray) {
+        if (carrierMode == "websocket" || carrierMode == "websocket-lanes") {
+            ws?.send(frameData.toByteString())
+        } else {
+            val seq = upSequence.incrementAndGet()
+            val upRequestBuilder = Request.Builder()
+                .url("https://$activeHostname/api/v1/up")
+                .header("Authorization", "Bearer $sessionToken")
+                .header("X-Up-Seq", seq.toString())
+                .post(frameData.toRequestBody("application/octet-stream".toMediaType()))
+                
+            if (carrierMode == "https-lanes") {
+                upRequestBuilder.header("X-Lane-ID", "1")
+            }
+
+            val upRequest = upRequestBuilder.build()
+
+            try {
+                val response = WebProxyManager.client.newCall(upRequest).execute()
+                val code = response.code
+                response.close()
+                if (code != 204) {
+                    Log.e(TAG, "Uplink chunk rejected: HTTP $code")
+                    println("WEBPROXY_ERROR: Uplink chunk rejected: HTTP $code")
+                    stop()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Uplink chunk failed", e)
+                stop()
+            }
+        }
+    }
+
+    fun stop() {
+        if (!isRunning.compareAndSet(true, false)) return
+        Log.d(TAG, "Stopping session handler")
+        try { socket.close() } catch (_: Exception) {}
+        try { ws?.close(1000, "Stop") } catch (_: Exception) {}
+        ws = null
+        
+        if (sessionToken.isNotEmpty()) {
+            thread(start = true) {
+                try {
+                    val request = Request.Builder()
+                        .url("https://$activeHostname/api/v1/session")
+                        .header("Authorization", "Bearer $sessionToken")
+                        .delete()
+                        .build()
+                    WebProxyManager.client.newCall(request).execute().close()
+                } catch (_: Exception) {}
+            }
+        }
+
+        readThread?.interrupt()
+        WebProxyManager.removeSession(sessionId)
+    }
+
+    private fun pollLoop() {
+        while (isRunning.get()) {
+            val requestBuilder = Request.Builder()
+                .url("https://$activeHostname/api/v1/down")
+                .header("Authorization", "Bearer $sessionToken")
+                .header("X-Down-Cursor", downCursor)
+                .post(ByteArray(0).toRequestBody(null))
+            
+            if (carrierMode == "https-lanes") {
+                requestBuilder.header("X-Lane-ID", "1")
+            }
+            
+            val request = requestBuilder.build()
+
+            try {
+                val response = WebProxyManager.client.newCall(request).execute()
+                if (response.code == 204) {
+                    response.close()
+                    continue
+                } else if (response.code == 200) {
+                    val nextCursor = response.header("X-Down-Cursor")
+                    if (nextCursor != null) {
+                        downCursor = nextCursor
+                    }
+                    val body = response.body?.bytes()
+                    if (body != null && body.isNotEmpty()) {
+                        try {
+                            processDownlink(body)
+                        } catch (e: Exception) {
+                            response.close()
+                            stop()
+                            return
+                        }
+                    }
+                    response.close()
+                } else {
+                    Log.e(TAG, "Downlink rejected: HTTP ${response.code}")
+                    println("WEBPROXY_ERROR: Downlink rejected: HTTP ${response.code}")
+                    response.close()
+                    stop()
+                    return
+                }
+            } catch (e: Exception) {
+                if (isRunning.get()) {
+                    Log.e(TAG, "Downlink error", e)
+                    stop()
+                }
+                return
+            }
+        }
+    }
+}
