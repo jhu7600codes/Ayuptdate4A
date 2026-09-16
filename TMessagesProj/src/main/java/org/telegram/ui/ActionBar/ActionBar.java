@@ -2510,4 +2510,22 @@ public class ActionBar extends FrameLayout implements FactorAnimator.Target, The
             invalidate();
         }
     }
+
+    public void refreshTitlePosition(boolean animated) {
+        boolean center = com.exteragram.messenger.ExteraConfig.centerTitle;
+        int titleGravity = center ? Gravity.CENTER : Gravity.CENTER_VERTICAL | Gravity.LEFT;
+        int subtitleGravity = center ? Gravity.CENTER : Gravity.LEFT;
+        for (int i = 0; i < 2; i++) {
+            if (titleTextView[i] != null) {
+                titleTextView[i].setGravity(titleGravity);
+            }
+        }
+        if (subtitleTextView != null) {
+            subtitleTextView.setGravity(subtitleGravity);
+        }
+        if (additionalSubtitleTextView != null) {
+            additionalSubtitleTextView.setGravity(subtitleGravity);
+        }
+        requestLayout();
+    }
 }

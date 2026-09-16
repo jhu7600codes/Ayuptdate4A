@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_background_extera">#FFE83030</color>
+    <color name="black">#FF000000</color>
+    <color name="mGreen200">#FFA5D6A7</color>
+    <color name="mGreen500">#FF4CAF50</color>
+    <color name="mGreen800">#FF2E7D32</color>
+    <color name="mRed200">#FFEF9A9A</color>
+    <color name="mRed500">#FFF44336</color>
+    <color name="mRed800">#FFC62828</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

@@ -1678,7 +1678,7 @@ public class FilterTabsView extends FrameLayout {
             if (firstTab != null && !NekoConfig.hideAllTab.Bool())  {
                 firstTab.setTitle(LocaleController.getString(R.string.FilterAllChats), null, false);
                 int tabWith = firstTab.getWidth(false);
-                firstTab.setTitle(allTabsWidth > width ? LocaleController.getString(R.string.FilterAllChatsShort) : LocaleController.getString(R.string.FilterAllChats), null, false);
+                firstTab.setTitle(!isStaticAllChats && allTabsWidth > width ? LocaleController.getString(R.string.FilterAllChatsShort) : LocaleController.getString(R.string.FilterAllChats), null, false);
                 trueTabsWidth = allTabsWidth - tabWith;
                 trueTabsWidth += firstTab.getWidth(false);
             } else {
@@ -2205,5 +2205,11 @@ public class FilterTabsView extends FrameLayout {
             }
         }
         finishAddingTabs(true);
+    }
+
+    private boolean isStaticAllChats;
+
+    public void setStaticAllChats(boolean value) {
+        isStaticAllChats = value;
     }
 }

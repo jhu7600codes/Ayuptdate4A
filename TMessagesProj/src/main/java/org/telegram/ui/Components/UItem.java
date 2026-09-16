@@ -910,4 +910,58 @@ public class UItem extends AdapterWithDiffUtils.Item {
         if (factory == null) throw new RuntimeException("UItemFactory was not setuped: " + factoryClass);
         return factory;
     }
+
+    public static UItem asButtonWithSubtext(int id, int iconResId, CharSequence text, CharSequence subtext, int pad, int intValue) {
+        UItem item = new UItem(UniversalAdapter.VIEW_TYPE_TEXT, false);
+        item.id = id;
+        item.iconResId = iconResId;
+        item.text = text;
+        item.subtext = subtext;
+        item.pad = pad;
+        item.intValue = intValue;
+        return item;
+    }
+
+    public static UItem asCheck(int id, CharSequence text, CharSequence textValue, boolean multiline) {
+        UItem item = new UItem(UniversalAdapter.VIEW_TYPE_CHECK, false);
+        item.id = id;
+        item.text = text;
+        item.textValue = textValue;
+        return item;
+    }
+
+    public static UItem asShadow() {
+        return new UItem(UniversalAdapter.VIEW_TYPE_SHADOW, false);
+    }
+
+    public UItem showDivider(boolean show) {
+        this.hideDivider = !show;
+        return this;
+    }
+
+    public UItem setSearchable(com.exteragram.messenger.preferences.BasePreferencesActivity fragment) {
+        if (com.exteragram.messenger.preferences.utils.SettingsRegistry.isValidForSearch(this)) {
+            com.exteragram.messenger.preferences.utils.SettingsRegistry.getInstance().addSearchEntry(fragment, this);
+        }
+        return this;
+    }
+
+    public UItem setLinkAlias(String alias, com.exteragram.messenger.preferences.BasePreferencesActivity fragment) {
+        if (com.exteragram.messenger.preferences.utils.SettingsRegistry.isValidForLinkAliases(this)) {
+            com.exteragram.messenger.preferences.utils.SettingsRegistry.getInstance().addLinkAliasForOption(alias, fragment, this);
+        }
+        return this;
+    }
+
+    public static UItem asExteraExpandableSwitch(int id, CharSequence text, CharSequence subText, View.OnClickListener switchClickListener) {
+        UItem item = asExpandableSwitch(id, text, subText);
+        item.clickCallback2 = switchClickListener;
+        return item;
+    }
+
+    public static UItem asSlideView(int id, String[] choices, int chosen, Utilities.Callback<Integer> whenChose) {
+        UItem item = asSlideView(choices, chosen, whenChose);
+        item.id = id;
+        return item;
+    }
 }

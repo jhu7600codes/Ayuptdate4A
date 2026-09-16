@@ -67,6 +67,7 @@ public class NekoSettingsActivity extends BaseNekoSettingsActivity {
 
     private int aboutRow;
     private int nullCoreRow;
+    private int exteraRow;
     private int channelRow;
     private int channelTipsRow;
     private int sourceCodeRow;
@@ -108,6 +109,8 @@ public class NekoSettingsActivity extends BaseNekoSettingsActivity {
             presentFragment(new NekoGhostModeActivity());
         } else if (position == debugRow) {
             presentFragment(new NekoDebugSettingsActivity());
+        } else if (position == exteraRow) {
+            presentFragment(new com.exteragram.messenger.preferences.MainPreferencesActivity());
         } else if (position == nullCoreRow) {
             getMessagesController().openByUserName("ayugram", this, 1);
         } else if (position == sourceCodeRow) {
@@ -171,6 +174,7 @@ public class NekoSettingsActivity extends BaseNekoSettingsActivity {
 
         aboutRow = addRow("about");
         nullCoreRow = addRow("nullCore");
+        exteraRow = addRow("extera");
         sourceCodeRow = addRow("sourceCode");
         datacenterRow = addRow("datacenter");
         networkLogRow = addRow("networkLog");
@@ -194,8 +198,10 @@ public class NekoSettingsActivity extends BaseNekoSettingsActivity {
             switch (holder.getItemViewType()) {
                 case TYPE_SETTINGS: {
                     TextSettingsCell textCell = (TextSettingsCell) holder.itemView;
-                    if (position == nullCoreRow) {
-                        textCell.setTextAndValue("NullCore Projects", "@NullCoreDeveloper", divider);
+                    if (position == exteraRow) {
+                        textCell.setText("exteraGram", divider);
+                    } else if (position == nullCoreRow) {
+                        textCell.setTextAndValue("AyuGram", "@ayugram", divider);
                     } else if (position == sourceCodeRow) {
                         textCell.setText(LocaleController.getString(R.string.SourceCode), divider);
                     } else if (position == datacenterRow) {
